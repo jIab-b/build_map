@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Nano Banana Infinimap</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  html,body,#map{height:100%;margin:0}
+  #ui{position:absolute;top:10px;left:10px;z-index:1000;background:#fff;border:1px solid #ccc;border-radius:6px;padding:8px 10px;font:14px/1.2 system-ui,Segoe UI,Arial}
+  #status{margin-top:6px;color:#333;font-size:12px}
+  input[type="text"]{width:260px;padding:6px}
+  label{margin-left:6px;user-select:none}
+</style>
+</head>
+<body>
+<div id="ui">
+  <label><input id="gen" type="checkbox"> Generate mode</label>
+  <div id="status"></div>
+</div>
+<div id="map"></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const TILE_SIZE=256, Z=8
+const transparent='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAQAAABx9QxEAAAAAnRSTlMAAHaTzTgAAAANSURBVHja7cEBAQAAAIIg/69uSEABAAAAAElFTkSuQmCC'
+const map=L.map('map',{center:[0,0],zoom:Z,minZoom:Z,maxZoom:Z,crs:L.CRS.Simple,noWrap:true,zoomControl:true})
+const layer=L.tileLayer('/tiles/8/{x}/{y}.png',{tileSize:TILE_SIZE,noWrap:true,errorTileUrl:transparent,updateWhenIdle:false,keepBuffer:0})
+layer.addTo(map)
+const genEl=document.getElementById('gen')
+const statusEl=document.getElementById('status')
+
+const PROMPTS=[
+  'lush forest with winding river',
+  'coastal town with piers and boats',
+  'desert dunes with ruins',
+  'snowy mountains and pines',
+  'ancient city streets at dusk',
+  'volcanic badlands with lava flows'
+]
+
+let dropdown
+function askPrompt(x,y){
+  if(dropdown){dropdown.remove();dropdown=null}
+  const div=document.createElement('div')
+  div.style.position='absolute'
+  div.style.zIndex='1001'
+  div.style.background='#fff'
+  div.style.border='1px solid #ccc'
+  div.style.borderRadius='6px'
+  div.style.padding='6px'
+  const sel=document.createElement('select')
+  sel.style.maxWidth='280px'
+  PROMPTS.forEach(p=>{const o=document.createElement('option');o.value=p;o.textContent=p;sel.appendChild(o)})
+  const ok=document.createElement('button')
+  ok.textContent='Generate'
+  ok.style.marginLeft='6px'
+  ok.onclick=async()=>{
+    const prompt=sel.value||''
+    div.remove();dropdown=null
+    setStatus('Generating...','#555')
+    try{
+      const r=await fetch('/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({x,y,z:Z,prompt})})
+      const j=await r.json().catch(()=>({ok:false}))
+      if(j.ok){setStatus(`Generated ${x},${y}`,'#0a0');refreshOnly(x,y)} else setStatus(j.error||'Generation failed','#a00')
+    }catch{setStatus('Network error','#a00')}
+  }
+  const cancel=document.createElement('button')
+  cancel.textContent='Cancel'
+  cancel.style.marginLeft='6px'
+  cancel.onclick=()=>{div.remove();dropdown=null}
+  div.appendChild(sel);div.appendChild(ok);div.appendChild(cancel)
+  const pt=map.latLngToContainerPoint(map.unproject([x*TILE_SIZE+1,y*TILE_SIZE+1],Z))
+  div.style.left=(pt.x+10)+'px'
+  div.style.top=(pt.y+10)+'px'
+  document.body.appendChild(div)
+  dropdown=div
+}
+
+function setStatus(t,c){statusEl.textContent=t;statusEl.style.color=c||'#333'}
+function xyFromLatLng(ll){const p=map.project(ll,Z);return {x:Math.floor(p.x/TILE_SIZE),y:Math.floor(p.y/TILE_SIZE)}}
+function refreshOnly(x,y){
+  let hit=false
+  const tiles=layer._tiles||{}
+  const now=Date.now()
+  Object.values(tiles).forEach(t=>{
+    if(t&&t.coords&&t.coords.z===Z&&t.coords.x===x&&t.coords.y===y&&t.el&&t.el.src){
+      const base=t.el.src.split('?')[0]
+      t.el.src=base+'?t='+now
+      hit=true
+    }
+  })
+  if(!hit) layer.redraw()
+}
+
+const gridCanvas=document.createElement('canvas')
+gridCanvas.width=1024
+gridCanvas.height=1024
+const gctx=gridCanvas.getContext('2d')
+gctx.clearRect(0,0,1024,1024)
+gctx.strokeStyle='rgba(0,0,0,0.25)'
+gctx.lineWidth=1
+for(let i=0;i<=1024;i+=TILE_SIZE){
+  gctx.beginPath();gctx.moveTo(i,0);gctx.lineTo(i,1024);gctx.stroke()
+  gctx.beginPath();gctx.moveTo(0,i);gctx.lineTo(1024,i);gctx.stroke()
+}
+const gridUrl=gridCanvas.toDataURL('image/png')
+const grid=L.tileLayer.gridPattern?null:null
+const gridLayer=L.tileLayer(gridUrl,{tileSize:1024,noWrap:true,opacity:1})
+gridLayer.addTo(map)
+
+map.on('click',async e=>{
+  const coords=xyFromLatLng(e.latlng)
+  const del=e.originalEvent&&e.originalEvent.shiftKey
+  if(del){
+    try{
+      const r=await fetch(`/tiles/${Z}/${coords.x}/${coords.y}`,{method:'DELETE'})
+      const j=await r.json().catch(()=>({ok:false}))
+      if(j.ok){setStatus(`Deleted ${coords.x},${coords.y}`,'#0a0');refreshOnly(coords.x,coords.y)} else setStatus('Delete failed','#a00')
+    }catch{setStatus('Delete error','#a00')}
+    return
+  }
+  if(!genEl.checked) return
+  askPrompt(coords.x,coords.y)
+})
+</script>
+</body>
+</html>
