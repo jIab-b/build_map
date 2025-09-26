@@ -19,8 +19,7 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 MAPS_DIR = BASE_DIR / "maps"
 TILE_SIZE = 64
-COLLAGE_TILES = 3
-COLLAGE_SIZE = TILE_SIZE * COLLAGE_TILES
+MAX_SELECTION_TILES = 15
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -34,6 +33,8 @@ def root():
 class GenerateIn(BaseModel):
     x: int
     y: int
+    width: int = 1
+    height: int = 1
     z: int
     prompt: str
 
@@ -125,31 +126,35 @@ def _make_matte(size: int) -> Image.Image:
     return img
 
 
-def _build_collage_image(map_id: str, z: int, x: int, y: int) -> tuple[Image.Image, list[tuple[int, int, bool]]]:
-    canvas = Image.new("RGBA", (COLLAGE_SIZE, COLLAGE_SIZE), (0, 0, 0, 0))
+def _build_selection_image(
+    map_id: str, z: int, x: int, y: int, width: int, height: int
+) -> tuple[Image.Image, list[tuple[int, int, bool]], bool]:
+    width_px = max(1, width * TILE_SIZE)
+    height_px = max(1, height * TILE_SIZE)
+    canvas = Image.new("RGBA", (width_px, height_px), (0, 0, 0, 0))
     matte = _make_matte(TILE_SIZE)
     info: list[tuple[int, int, bool]] = []
-    for dy in range(-1, 2):
-        for dx in range(-1, 2):
-            px = (dx + 1) * TILE_SIZE
-            py = (dy + 1) * TILE_SIZE
-            pos = (px, py)
-            if dx == 0 and dy == 0:
-                canvas.paste(matte, pos)
-                info.append((dx, dy, False))
-                continue
-            p = _find_latest_tile_path(map_id, z, x + dx, y + dy)
+    have_tiles = False
+    for dy in range(height):
+        for dx in range(width):
+            pos_x = dx * TILE_SIZE
+            pos_y = dy * TILE_SIZE
+            pos = (pos_x, pos_y)
+            tile_x = x + dx
+            tile_y = y + dy
+            p = _find_latest_tile_path(map_id, z, tile_x, tile_y)
             exists = bool(p and p.exists())
-            info.append((dx, dy, exists))
+            info.append((tile_x, tile_y, exists))
             if not exists:
                 canvas.paste(matte, pos)
                 continue
+            have_tiles = True
             with Image.open(p) as im:
                 tile_img = im.convert("RGBA")
                 if tile_img.size != (TILE_SIZE, TILE_SIZE):
                     tile_img = tile_img.resize((TILE_SIZE, TILE_SIZE), Image.LANCZOS)
                 canvas.paste(tile_img, pos)
-    return canvas, info
+    return canvas, info, have_tiles
 
 
 async def _upload_public_image(buf: bytes) -> Optional[str]:
@@ -196,7 +201,7 @@ def _parse_resp_json(obj: dict) -> Optional[bytes | str]:
     return None
 
 
-async def fal_generate_edit(png_grid: bytes, prompt: str) -> Optional[bytes]:
+async def fal_generate_edit(png_grid: bytes, prompt: str, width: int, height: int) -> Optional[bytes]:
     api_key = os.environ.get("FAL_API_KEY") or os.environ.get("FAL_KEY")
     if not api_key:
         print("[fal] missing api key", flush=True)
@@ -205,6 +210,7 @@ async def fal_generate_edit(png_grid: bytes, prompt: str) -> Optional[bytes]:
     headers = {"Authorization": f"Key {api_key}", "Content-Type": "application/json"}
     public_url = await _upload_public_image(png_grid)
     attempts: list[tuple[str, dict]] = []
+    image_size = {"width": width, "height": height}
     if public_url:
         attempts.extend(
             [
@@ -213,7 +219,7 @@ async def fal_generate_edit(png_grid: bytes, prompt: str) -> Optional[bytes]:
                     {
                         "prompt": prompt,
                         "image_urls": [public_url],
-                        "image_size": {"width": COLLAGE_SIZE, "height": COLLAGE_SIZE},
+                        "image_size": image_size,
                     },
                 ),
                 (
@@ -221,7 +227,7 @@ async def fal_generate_edit(png_grid: bytes, prompt: str) -> Optional[bytes]:
                     {
                         "prompt": prompt,
                         "image_url": public_url,
-                        "image_size": {"width": COLLAGE_SIZE, "height": COLLAGE_SIZE},
+                        "image_size": image_size,
                     },
                 ),
             ]
@@ -232,31 +238,31 @@ async def fal_generate_edit(png_grid: bytes, prompt: str) -> Optional[bytes]:
     b64 = base64.b64encode(png_grid).decode()
     attempts.extend(
         [
-            (
-                "shape_data_url",
-                {
-                    "prompt": prompt,
-                    "image_urls": [f"data:image/png;base64,{b64}"],
-                    "image_size": {"width": COLLAGE_SIZE, "height": COLLAGE_SIZE},
-                },
-            ),
-            (
-                "shape_image_base64",
-                {
-                    "prompt": prompt,
-                    "image": {"data": b64, "mime_type": "image/png"},
-                    "image_size": {"width": COLLAGE_SIZE, "height": COLLAGE_SIZE},
-                },
-            ),
-            (
-                "shape_images_base64",
-                {
-                    "prompt": prompt,
-                    "images": [{"data": b64, "mime_type": "image/png"}],
-                    "image_size": {"width": COLLAGE_SIZE, "height": COLLAGE_SIZE},
-                },
-            ),
-        ]
+                (
+                    "shape_data_url",
+                    {
+                        "prompt": prompt,
+                        "image_urls": [f"data:image/png;base64,{b64}"],
+                        "image_size": image_size,
+                    },
+                ),
+                (
+                    "shape_image_base64",
+                    {
+                        "prompt": prompt,
+                        "image": {"data": b64, "mime_type": "image/png"},
+                        "image_size": image_size,
+                    },
+                ),
+                (
+                    "shape_images_base64",
+                    {
+                        "prompt": prompt,
+                        "images": [{"data": b64, "mime_type": "image/png"}],
+                        "image_size": image_size,
+                    },
+                ),
+            ]
     )
     async with httpx.AsyncClient(timeout=120) as client:
         for shape_name, payload in attempts:
@@ -365,47 +371,108 @@ async def generate_for_map(map_id: str, inp: GenerateIn):
         raise HTTPException(status_code=404, detail="not found")
     _ensure_map(map_id)
     try:
-        print(f"[gen] map={map_id} z={inp.z} x={inp.x} y={inp.y}", flush=True)
-        collage, info = _build_collage_image(map_id, inp.z, inp.x, inp.y)
-        have_neighbors = sum(1 for _, _, ok in info if ok)
-        print(f"[gen] neighbors_present={have_neighbors}", flush=True)
-        buf = BytesIO()
-        collage.save(buf, format="PNG")
-        png_bytes = buf.getvalue()
+        width = int(inp.width or 1)
+        height = int(inp.height or 1)
+        if width < 1 or height < 1:
+            raise HTTPException(status_code=400, detail="invalid selection size")
+        if width > MAX_SELECTION_TILES or height > MAX_SELECTION_TILES:
+            raise HTTPException(status_code=400, detail="selection too large")
+
+        print(
+            f"[gen] map={map_id} z={inp.z} x={inp.x} y={inp.y} width={width} height={height}",
+            flush=True,
+        )
+        selection_img, info, have_tiles = _build_selection_image(
+            map_id, inp.z, inp.x, inp.y, width, height
+        )
+        existing_tiles = sum(1 for _, _, exists in info if exists)
+        print(
+            f"[gen] selection_contains={existing_tiles} existing tiles (have_tiles={have_tiles})",
+            flush=True,
+        )
+
         base, tiles_root, up_root, down_root, _ = _map_paths(map_id)
         seq = _next_seq(map_id)
-        (up_root / f"{seq:06d}.png").write_bytes(png_bytes)
-        if have_neighbors == 0:
-            full_prompt = f"{inp.prompt}. No text."
-            result_bytes = await fal_text_to_image(full_prompt, TILE_SIZE, TILE_SIZE)
-            mode = "t2i"
+
+        png_bytes: Optional[bytes] = None
+        if have_tiles:
+            buf = BytesIO()
+            selection_img.save(buf, format="PNG")
+            png_bytes = buf.getvalue()
+            (up_root / f"{seq:06d}.png").write_bytes(png_bytes)
         else:
-            full_prompt = f"{inp.prompt} Only fill the checkerboard center tile; keep all other areas exactly unchanged; match edges to neighbors; no text."
-            result_bytes = await fal_generate_edit(png_bytes, full_prompt)
+            print("[gen] no existing tiles in selection; skipping collage upload", flush=True)
+
+        req_width = width * TILE_SIZE
+        req_height = height * TILE_SIZE
+
+        if have_tiles and png_bytes:
+            full_prompt = (
+                f"{inp.prompt} Only adjust the provided tiles. Keep any areas that look like"
+                " placeholders or transparent regions unchanged. Preserve edges so they"
+                " align with neighbouring tiles. No text."
+            )
+            result_bytes = await fal_generate_edit(png_bytes, full_prompt, req_width, req_height)
             mode = "i2i"
+        else:
+            full_prompt = f"{inp.prompt}. No text."
+            result_bytes = await fal_text_to_image(full_prompt, req_width, req_height)
+            mode = "t2i"
+
         if not result_bytes:
             print("[gen] model failed, using fallback", flush=True)
             fallback = True
-            result_bytes = png_bytes
+            if have_tiles and png_bytes:
+                result_bytes = png_bytes
+            else:
+                empty_img = Image.new("RGBA", (req_width, req_height), (0, 0, 0, 0))
+                buf = BytesIO()
+                empty_img.save(buf, format="PNG")
+                result_bytes = buf.getvalue()
         else:
             fallback = False
             (down_root / f"{seq:06d}.png").write_bytes(result_bytes)
+
+        updated_tiles = []
         with Image.open(BytesIO(result_bytes)) as im:
-            w, h = im.size
-            if mode == "i2i":
-                seg_w = max(1, int(w / COLLAGE_TILES))
-                seg_h = max(1, int(h / COLLAGE_TILES))
-                tile = im.crop((seg_w, seg_h, seg_w * 2, seg_h * 2))
-            else:
-                tile = im
-            if tile.size != (TILE_SIZE, TILE_SIZE):
-                tile = tile.resize((TILE_SIZE, TILE_SIZE), Image.LANCZOS)
-            out_dir = tiles_root / str(inp.z) / str(inp.x)
-            out_dir.mkdir(parents=True, exist_ok=True)
-            out_path = out_dir / f"{seq:06d}_{inp.y}.png"
-            tile.save(out_path)
-        print(f"[gen] saved {out_path}", flush=True)
-        return {"ok": True, "seq": seq, "fallback": fallback, "tile": f"/maps/{map_id}/tiles/{inp.z}/{inp.x}/{inp.y}.png"}
+            combo = im.convert("RGBA")
+            if combo.size != (req_width, req_height):
+                combo = combo.resize((req_width, req_height), Image.LANCZOS)
+            for dy in range(height):
+                for dx in range(width):
+                    crop_box = (
+                        dx * TILE_SIZE,
+                        dy * TILE_SIZE,
+                        (dx + 1) * TILE_SIZE,
+                        (dy + 1) * TILE_SIZE,
+                    )
+                    tile_img = combo.crop(crop_box).convert("RGBA")
+                    if tile_img.size != (TILE_SIZE, TILE_SIZE):
+                        tile_img = tile_img.resize((TILE_SIZE, TILE_SIZE), Image.LANCZOS)
+                    out_dir = tiles_root / str(inp.z) / str(inp.x + dx)
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    out_path = out_dir / f"{seq:06d}_{inp.y + dy}.png"
+                    tile_img.save(out_path)
+                    updated_tiles.append(
+                        {
+                            "x": inp.x + dx,
+                            "y": inp.y + dy,
+                            "url": f"/maps/{map_id}/tiles/{inp.z}/{inp.x + dx}/{inp.y + dy}.png",
+                        }
+                    )
+        print(
+            f"[gen] saved {len(updated_tiles)} tiles seq={seq} fallback={fallback}",
+            flush=True,
+        )
+        return {
+            "ok": True,
+            "seq": seq,
+            "fallback": fallback,
+            "mode": mode,
+            "tiles": updated_tiles,
+            "width": width,
+            "height": height,
+        }
     except Exception as e:
         print(f"[gen] exception {e}", flush=True)
         return JSONResponse({"ok": False, "error": str(e)})
