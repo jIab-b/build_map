@@ -13,7 +13,7 @@
   <select id="mapSel"></select>
   <input id="newMap" placeholder="new id (4 letters)" maxlength="4" style="width:120px" />
   <button id="createBtn">Create</button>
-  <label style="display:inline-flex;align-items:center;gap:4px"><input type="checkbox" id="deleteChk"/> Delete</label>
+  <button id="deleteBtn">Delete</button>
 </div>
 <canvas id="c"></canvas>
 <script>
@@ -46,21 +46,23 @@ function draw(){const r=canvas.getBoundingClientRect();ctx.setTransform(dpr,0,0,
 window.addEventListener('resize',()=>{size();draw()})
 window.addEventListener('keydown',e=>{if(isEditableTarget(e.target))return;if(e.code==='Space'){if(!isSpaceDown)e.preventDefault();isSpaceDown=true}if(e.key==='Escape'){if(selecting){selecting=false;selectionRect=null}else{highlightRect=null}draw()}})
 window.addEventListener('keyup',e=>{if(isEditableTarget(e.target))return;if(e.code==='Space')isSpaceDown=false})
-canvas.addEventListener('mousedown',e=>{if((e.button===0&&isSpaceDown)||e.button===1||e.button===2){panActive=true;lastX=e.clientX;lastY=e.clientY;e.preventDefault();return}if(e.button!==0)return;const start=tileFromClient(e.clientX,e.clientY);selecting=true;selectionStart=start;selectionRect={x:start.x,y:start.y,width:1,height:1};highlightRect=null;draw();e.preventDefault()})
+function pointInRect(pt,rect){if(!rect)return false;return pt.x>=rect.x&&pt.y>=rect.y&&pt.x<rect.x+rect.width&&pt.y<rect.y+rect.height}
+canvas.addEventListener('mousedown',e=>{if((e.button===0&&isSpaceDown)||e.button===1||e.button===2){panActive=true;lastX=e.clientX;lastY=e.clientY;e.preventDefault();return}if(e.button!==0)return;const pt=tileFromClient(e.clientX,e.clientY);if(highlightRect){if(pointInRect(pt,highlightRect)){requestGeneration(highlightRect);e.preventDefault();return}else{highlightRect=null;draw();e.preventDefault();return}}selecting=true;selectionStart=pt;selectionRect={x:pt.x,y:pt.y,width:1,height:1};draw();e.preventDefault()})
 window.addEventListener('mousemove',e=>{if(panActive){originX+=e.clientX-lastX;originY+=e.clientY-lastY;lastX=e.clientX;lastY=e.clientY;draw();return}if(!selecting)return;updateSelection(tileFromClient(e.clientX,e.clientY));draw()})
 window.addEventListener('mouseup',e=>{if(panActive&&(e.button===0||e.button===1||e.button===2))panActive=false;if(selecting&&e.button===0)finalizeSelection()})
 canvas.addEventListener('contextmenu',e=>e.preventDefault())
 canvas.addEventListener('wheel',e=>{e.preventDefault();const rect=canvas.getBoundingClientRect();const mx=e.clientX-rect.left;const my=e.clientY-rect.top;const prevScale=Math.pow(2,zoom);const step=e.deltaY<0?0.25:-0.25;zoom=Math.min(6,Math.max(-6,zoom+step));const scale=Math.pow(2,zoom);originX=mx-(mx-originX)*(scale/prevScale);originY=my-(my-originY)*(scale/prevScale);draw()},{passive:false})
 async function loadTiles(infos){if(!Array.isArray(infos)||!infos.length)return;const tasks=infos.map(info=>new Promise(resolve=>{const img=new Image();img.onload=()=>{tiles.set(key(info.x,info.y),{img,x:info.x,y:info.y});resolve()};img.onerror=()=>{console.warn('tile load failed',info);resolve()};img.src=`${info.url}?t=${Date.now()}`;}));await Promise.all(tasks)}
 async function hydrateExisting(){try{const r=await fetch(`/maps/${MAP_ID}/tiles/${Z}`);if(!r.ok)return;const j=await r.json().catch(()=>null);if(!j||!Array.isArray(j.tiles))return;await loadTiles(j.tiles);draw()}catch(err){console.warn('hydrate failed',err)}}
-async function requestGeneration(rect){const copy={...rect};const del=document.getElementById('deleteChk')&&document.getElementById('deleteChk').checked===true;let text='';if(!del){const promptText=window.prompt(`Prompt for ${copy.width}x${copy.height}`,lastPrompt);if(promptText===null){highlightRect=null;draw();return}text=promptText.trim();if(text)lastPrompt=text}highlightRect=copy;draw();try{const res=await fetch(`/maps/${MAP_ID}/generate`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({x:copy.x,y:copy.y,width:copy.width,height:copy.height,z:Z,prompt:text,delete:del})});const json=await res.json().catch(()=>null);if(!res.ok||!json||json.ok!==true){alert('Generation failed');return}if(Array.isArray(json.tiles)&&json.tiles.length){await loadTiles(json.tiles)}if(Array.isArray(json.removed)&&json.removed.length){json.removed.forEach(t=>{tiles.delete(key(t.x,t.y))})}draw()}catch(err){alert('Generation error')}finally{highlightRect=null;draw()}}
-function finalizeSelection(){const rect=selectionRect?{...selectionRect}:null;selecting=false;selectionStart=null;selectionRect=null;if(!rect){draw();return}highlightRect=rect;draw();requestGeneration(rect)}
+async function requestGeneration(rect,del=false){const copy={...rect};let text='';if(!del){const promptText=window.prompt(`Prompt for ${copy.width}x${copy.height}`,lastPrompt);if(promptText===null){draw();return}text=promptText.trim();if(text)lastPrompt=text}highlightRect=copy;draw();try{const res=await fetch(`/maps/${MAP_ID}/generate`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({x:copy.x,y:copy.y,width:copy.width,height:copy.height,z:Z,prompt:text,delete:del})});const json=await res.json().catch(()=>null);if(!res.ok||!json||json.ok!==true){alert('Generation failed');return}if(Array.isArray(json.tiles)&&json.tiles.length){await loadTiles(json.tiles)}if(Array.isArray(json.removed)&&json.removed.length){json.removed.forEach(t=>{tiles.delete(key(t.x,t.y))})}draw()}catch(err){alert('Generation error')}finally{highlightRect=null;draw()}}
+function finalizeSelection(){const rect=selectionRect?{...selectionRect}:null;selecting=false;selectionStart=null;selectionRect=null;if(!rect){draw();return}highlightRect=rect;draw()}
 size();draw()
 
 async function refreshMaps(){
   try{const r=await fetch('/maps');if(!r.ok)return;const j=await r.json().catch(()=>null);if(!j||!Array.isArray(j.maps))return;const sel=document.getElementById('mapSel');sel.innerHTML='';j.maps.forEach(id=>{const o=document.createElement('option');o.value=id;o.textContent=id;if(id===MAP_ID)o.selected=true;sel.appendChild(o)});sel.onchange=()=>{MAP_ID=sel.value;tiles.clear();selectionRect=null;highlightRect=null;draw();hydrateExisting()}}catch(err){console.error('map refresh failed',err)}}
 document.getElementById('createBtn').onclick=async()=>{const v=(document.getElementById('newMap').value||'').trim().toLowerCase();if(!/^[a-z]{4}$/.test(v))return alert('4 letters');const r=await fetch('/maps',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({map_id:v})});const j=await r.json().catch(()=>({ok:false}));if(j.ok){MAP_ID=v;tiles.clear();selectionRect=null;highlightRect=null;document.getElementById('newMap').value='';refreshMaps();draw()}}
-refreshMaps();hydrateExisting()
+refreshMaps();hydrateExisting();
+document.getElementById('deleteBtn').onclick=async()=>{if(!highlightRect){alert('No selection');return}const ok=window.confirm('Delete selected tiles?');if(!ok)return;await requestGeneration(highlightRect,true)}
 </script>
 </body>
 </html>
