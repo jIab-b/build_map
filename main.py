@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw
+from os import scandir
 
 load_dotenv()
 
@@ -37,6 +38,7 @@ class GenerateIn(BaseModel):
     height: int = 1
     z: int
     prompt: str
+    delete: bool = False
 
 
 class MapCreateIn(BaseModel):
@@ -64,6 +66,36 @@ def _find_latest_tile_path(map_id: str, z: int, x: int, y: int) -> Optional[Path
             best_seq = seq_val
             best_path = p
     return best_path
+
+
+def _scan_existing_tiles(map_id: str, z: int) -> list[dict]:
+    base, tiles_root, _, _, _ = _map_paths(map_id)
+    out: list[dict] = []
+    z_dir = tiles_root / str(z)
+    if not z_dir.exists():
+        return out
+    for x_dir in z_dir.iterdir():
+        if not x_dir.is_dir():
+            continue
+        try:
+            x_val = int(x_dir.name)
+        except Exception:
+            continue
+        for p in x_dir.glob("*_*.png"):
+            stem = p.stem
+            parts = stem.split("_")
+            if len(parts) != 2:
+                continue
+            try:
+                y_val = int(parts[1])
+            except Exception:
+                continue
+            out.append({
+                "x": x_val,
+                "y": y_val,
+                "url": f"/maps/{map_id}/tiles/{z}/{x_val}/{y_val}.png"
+            })
+    return out
 
 
 @app.get("/maps")
@@ -365,6 +397,16 @@ def get_map_tile(map_id: str, z: int, x: int, y: int):
     raise HTTPException(status_code=404, detail="not found")
 
 
+@app.get("/maps/{map_id}/tiles/{z}")
+def list_existing_tiles(map_id: str, z: int):
+    if not _valid_map_id(map_id):
+        raise HTTPException(status_code=404, detail="not found")
+    _ensure_map(map_id)
+    tiles = _scan_existing_tiles(map_id, z)
+    tiles.sort(key=lambda t: (t["x"], t["y"]))
+    return {"tiles": tiles}
+
+
 @app.post("/maps/{map_id}/generate")
 async def generate_for_map(map_id: str, inp: GenerateIn):
     if not _valid_map_id(map_id):
@@ -394,6 +436,33 @@ async def generate_for_map(map_id: str, inp: GenerateIn):
         base, tiles_root, up_root, down_root, _ = _map_paths(map_id)
         seq = _next_seq(map_id)
 
+        if inp.delete:
+            base, tiles_root, _, _, _ = _map_paths(map_id)
+            removed = []
+            for dy in range(height):
+                for dx in range(width):
+                    tile_x = inp.x + dx
+                    tile_y = inp.y + dy
+                    x_dir = tiles_root / str(inp.z) / str(tile_x)
+                    if x_dir.exists():
+                        for p in x_dir.glob(f"*_{tile_y}.png"):
+                            try:
+                                p.unlink()
+                            except Exception:
+                                pass
+                    removed.append({"x": tile_x, "y": tile_y})
+            print(f"[gen] deleted {len(removed)} tiles", flush=True)
+            return {
+                "ok": True,
+                "seq": None,
+                "fallback": False,
+                "mode": "delete",
+                "tiles": [],
+                "removed": removed,
+                "width": width,
+                "height": height,
+            }
+
         png_bytes: Optional[bytes] = None
         if have_tiles:
             buf = BytesIO()
@@ -406,16 +475,21 @@ async def generate_for_map(map_id: str, inp: GenerateIn):
         req_width = width * TILE_SIZE
         req_height = height * TILE_SIZE
 
+        user_prompt = (inp.prompt or "").strip()
         if have_tiles and png_bytes:
             full_prompt = (
-                f"{inp.prompt} Only adjust the provided tiles. Keep any areas that look like"
-                " placeholders or transparent regions unchanged. Preserve edges so they"
-                " align with neighbouring tiles. No text."
+                f"{user_prompt}, pixel art style, top down view"
+                if user_prompt
+                else "pixel art style, top down view"
             )
             result_bytes = await fal_generate_edit(png_bytes, full_prompt, req_width, req_height)
             mode = "i2i"
         else:
-            full_prompt = f"{inp.prompt}. No text."
+            full_prompt = (
+                f"{user_prompt}, pixel art style, top down view. No text."
+                if user_prompt
+                else "pixel art style, top down view. No text."
+            )
             result_bytes = await fal_text_to_image(full_prompt, req_width, req_height)
             mode = "t2i"
 
